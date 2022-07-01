@@ -2,6 +2,8 @@
 using Rebus.Activation;
 using Rebus.Config;
 using Rebus.Handlers;
+using Rebus.Routing.TypeBased;
+using Rebus.Subscriptions;
 
 namespace ConsoleApp2
 {
@@ -9,7 +11,17 @@ namespace ConsoleApp2
     {
         public static void Main()
         {
-            using var activator = new BuiltinHandlerActivator();
+            using var activator1 = NewMethod(true);
+            using var activator2 = NewMethod(false);
+            using var activator3 = NewMethod(false);
+
+            Console.WriteLine("Press enter to quit");
+            Console.ReadLine();
+        }
+
+        private static IDisposable NewMethod(bool send)
+        {
+            var activator = new BuiltinHandlerActivator();
 
             var print = new PrintDateTime();
 
@@ -18,26 +30,46 @@ namespace ConsoleApp2
             var mongoClient = new MongoClient("mongodb://localhost");
             var mongoDatabase = mongoClient.GetDatabase("foo");
 
-            Configure.With(activator)
-                .Options(o => {
+            var bus = Configure.With(activator)
+                .Options(o =>
+                {
                     o.SetNumberOfWorkers(5);
                     o.SetMaxParallelism(10);
                 })
+                .Subscriptions(s =>
+                {
+                    s.StoreInMongoDb(mongoDatabase, "Subscriptions", true);
+                })
                 .Logging(x => x.Console(Rebus.Logging.LogLevel.Info))
-                .Transport(t => t.UseMongoDb(mongoDatabase, new MongoTransportOptions { Prefetch = 100 }))
+                .Transport(t => t.UseMongoDb(mongoDatabase, Guid.NewGuid().ToString(), new MongoTransportOptions { Prefetch = 100 }))
                 .Start();
 
-            while (true)
-            {
-                // activator.Bus.SendLocal(DateTime.Now).Wait();
-            }
             var timer = new System.Timers.Timer();
-            timer.Elapsed += delegate { ; };
+            timer.Elapsed += delegate {; };
             timer.Interval = 1000;
             timer.Start();
 
-            Console.WriteLine("Press enter to quit");
-            Console.ReadLine();
+            bus.Subscribe(typeof(DateTime)).Wait();
+
+            Task.Run(async () =>
+            {
+                while (true && send)
+                {
+                    try
+                    {
+                        await bus.Publish(DateTime.UtcNow);
+
+                    }
+                    catch
+                    {
+
+                    }
+
+                    await Task.Delay(1080);
+                }
+            });
+            
+            return bus;
         }
 
         public class PrintDateTime : IHandleMessages<DateTime>
@@ -46,10 +78,7 @@ namespace ConsoleApp2
 
             public Task Handle(DateTime currentDateTime)
             {
-                if (Interlocked.Increment(ref count) % 50 == 0)
-                {
-                    Console.WriteLine("The time is {0} with {1} count", currentDateTime, count);
-                }
+                Console.WriteLine("The time is {0} with {1} count", currentDateTime, count);
 
                 return Task.CompletedTask;
             }

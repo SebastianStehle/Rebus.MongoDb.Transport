@@ -9,7 +9,7 @@ using System.Collections.Concurrent;
 
 namespace ConsoleApp2
 {
-    public sealed class MongoTransport : ITransport
+    public sealed class MongoTransport : AbstractRebusTransport
     {
         private static readonly UpdateDefinitionBuilder<MongoMessage> Update = Builders<MongoMessage>.Update;
         private readonly ConcurrentQueue<MongoMessage> prefetchedMessages = new ConcurrentQueue<MongoMessage>();
@@ -17,9 +17,8 @@ namespace ConsoleApp2
         private readonly IRebusTime timer;
         private readonly MongoTransportOptions options;
 
-        public string Address => "incoming";
-
-        public MongoTransport(IRebusTime timer, IMongoDatabase database, MongoTransportOptions options)
+        public MongoTransport(IRebusTime timer, IMongoDatabase database, string address, MongoTransportOptions options)
+            : base(address)
         {
             this.timer = timer;
 
@@ -44,11 +43,11 @@ namespace ConsoleApp2
             this.options = options;
         }
 
-        public void CreateQueue(string address)
+        public override void CreateQueue(string address)
         {
         }
 
-        public async Task<TransportMessage?> Receive(ITransactionContext context,
+        public override async Task<TransportMessage?> Receive(ITransactionContext context,
             CancellationToken cancellationToken)
         {
             var now = timer.Now.UtcDateTime;
@@ -146,50 +145,34 @@ namespace ConsoleApp2
             });
         }
 
-        public Task Send(string destinationAddress, TransportMessage message, ITransactionContext context)
+        protected override async Task SendOutgoingMessages(IEnumerable<OutgoingMessage> outgoingMessages, ITransactionContext context)
         {
-            var outgoingMessages = context.GetOrAdd("outgoing-messages", () =>
-            {
-                var messagesToSend = new ConcurrentQueue<MongoMessage>();
-
-                context.OnCommitted(async _ =>
-                {
-                    var request = messagesToSend.ToList();
-
-                    // InsertManyAsync requires at least one item.
-                    if (request.Count == 0)
-                    {
-                        return;
-                    }
-
-                    try
-                    {
-                        await collection.InsertManyAsync(request);
-                    }
-                    catch (Exception exception)
-                    {
-                        var errorText = $"Could not send message with ID {message.GetMessageId()} to '{destinationAddress}'";
-
-                        throw new RebusApplicationException(exception, errorText);
-                    }
-                });
-
-                return messagesToSend;
-            });
-
-            var messageToSend = new MongoMessage
+            var request = outgoingMessages.Select(x => new MongoMessage
             {
                 Id = Guid.NewGuid().ToString(),
-                DestinationAddress = destinationAddress,
-                MessageHeaders = message.Headers,
-                MessageBody = message.Body,
-                TimeToLive = GetTimeToLive(message.Headers),
-                TimeToDefer = GetTimeToDefer(message.Headers)
-            };
+                DestinationAddress = x.DestinationAddress,
+                MessageHeaders = x.TransportMessage.Headers,
+                MessageBody = x.TransportMessage.Body,
+                TimeToLive = GetTimeToLive(x.TransportMessage.Headers),
+                TimeToDefer = GetTimeToDefer(x.TransportMessage.Headers)
+            }).ToList();
 
-            outgoingMessages.Enqueue(messageToSend);
+            // InsertManyAsync requires at least one item.
+            if (request.Count == 0)
+            {
+                return;
+            }
 
-            return Task.CompletedTask;
+            try
+            {
+                await collection.InsertManyAsync(request);
+            }
+            catch (Exception exception)
+            {
+                var errorText = $"Could not send messages.";
+
+                throw new RebusApplicationException(exception, errorText);
+            }
         }
 
         private DateTime GetTimeToLive(IReadOnlyDictionary<string, string> headers)
